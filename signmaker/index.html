@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<title>SignMaker MVP</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;900&family=Onest:wght@400;700;900&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --bg:       #0b0d14;
+  --surface:  #131624;
+  --card:     #1a1e30;
+  --border:   rgba(124,106,247,.18);
+  --accent:   #7c6af7;
+  --green:    #4ecca3;
+  --yellow:   #f7c948;
+  --red:      #ff6b8a;
+  --text:     #eef0ff;
+  --muted:    #7a7f9a;
+  --r:        18px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Nunito', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* quick success flash fallback (if confetti lib fails) */
+body.flash-success {
+  animation: flashSuccess 0.45s ease-in-out;
+}
+@keyframes flashSuccess {
+  0%   { background: #0b0d14; }
+  35%  { background: rgba(78,204,163,.14); }
+  100% { background: #0b0d14; }
+}
+
+/* ─── Loading ─── */
+#loading {
+  position: fixed; inset: 0; z-index: 300;
+  background: var(--bg);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;
+  transition: opacity .4s;
+}
+#loading.hidden { opacity: 0; pointer-events: none; }
+.spin {
+  width: 52px; height: 52px;
+  border: 4px solid rgba(124,106,247,.15);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#load-title {
+  font-family: 'Onest', sans-serif;
+  font-size: clamp(2rem, 6vw, 3rem);
+  font-weight: 900;
+  background: linear-gradient(135deg, var(--accent), var(--green));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+#load-msg { color: var(--muted); font-size: .95rem; font-weight: 600; }
+
+/* ─── Layout ─── */
+.wrap {
+  width: 100%; max-width: 1200px;
+  padding: 20px 16px 40px;
+  display: flex; flex-direction: column; align-items: center; gap: 18px;
+}
+
+header { text-align: center; }
+header h1 {
+  font-family: 'Onest', sans-serif;
+  font-size: clamp(1.8rem, 4.5vw, 2.6rem);
+  font-weight: 900;
+  background: linear-gradient(135deg, var(--accent), var(--green));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  letter-spacing: -.02em;
+}
+header p { color: var(--muted); font-size: .85rem; font-weight: 700; letter-spacing: .1em; margin-top: 4px; text-transform: uppercase; }
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  width: 100%;
+}
+@media (min-width: 820px) { .grid { grid-template-columns: 1fr 1fr; } }
+
+/* ─── Camera box ─── */
+.cam-wrap {
+  background: var(--surface);
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+  aspect-ratio: 4/3;
+  box-shadow: 0 12px 50px rgba(0,0,0,.6);
+}
+#webcam, #canvas {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  border-radius: var(--r);
+  transform: scaleX(-1);   /* mirror */
+}
+#canvas { z-index: 2; }
+
+/* gesture overlay at bottom of camera */
+.g-bar {
+  position: absolute; bottom: 12px; left: 12px; right: 12px; z-index: 10;
+  background: rgba(11,13,20,.88);
+  border: 1px solid rgba(78,204,163,.35);
+  border-radius: 14px;
+  padding: 10px 14px;
+  backdrop-filter: blur(10px);
+  display: flex; align-items: center; gap: 12px;
+}
+.g-emoji { font-size: 2.2rem; line-height: 1; }
+.g-info { flex: 1; }
+.g-name { font-size: 1rem; color: var(--green); font-weight: 800; }
+.g-hands { font-size: .75rem; color: var(--muted); margin-top: 1px; }
+.conf-row { display: flex; align-items: center; gap: 6px; margin-top: 5px; }
+.conf-bar { flex: 1; height: 4px; background: rgba(255,255,255,.08); border-radius: 10px; overflow: hidden; }
+.conf-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--green)); transition: width .2s; }
+.conf-pct { font-size: .75rem; color: var(--muted); min-width: 32px; text-align: right; }
+
+/* cam error */
+#cam-err {
+  display: none; position: absolute; inset: 0; z-index: 20;
+  background: rgba(11,13,20,.95); border-radius: var(--r);
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; text-align: center; padding: 24px;
+}
+#cam-err.show { display: flex; }
+.err-btn {
+  background: var(--accent); border: none; border-radius: 12px;
+  color: #fff; font-family: 'Nunito',sans-serif;
+  font-weight: 800; font-size: 1rem;
+  padding: 12px 28px; cursor: pointer;
+  transition: opacity .15s;
+}
+.err-btn:hover { opacity: .82; }
+
+/* ─── Right column ─── */
+.dialog { display: flex; flex-direction: column; gap: 12px; }
+
+.stage-bar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 16px;
+  display: flex; align-items: center; gap: 12px;
+}
+.stage-icon { font-size: 1.6rem; }
+.stage-label { font-size: .7rem; color: var(--muted); text-transform: uppercase; font-weight: 700; letter-spacing: .09em; }
+.stage-name  { font-size: .95rem; font-weight: 800; color: var(--text); }
+
+.ai-bubble {
+  background: var(--card);
+  border: 1px solid rgba(247,201,72,.25);
+  border-radius: var(--r);
+  padding: 18px;
+}
+.bubble-label {
+  font-size: .68rem; font-weight: 800; color: var(--yellow);
+  text-transform: uppercase; letter-spacing: .1em;
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 10px;
+}
+#ai-text {
+  font-size: clamp(.95rem, 2.4vw, 1.15rem);
+  font-weight: 700; line-height: 1.65; color: var(--text);
+  min-height: 80px;
+  transition: opacity .2s;
+}
+#ai-text.fade { opacity: 0; }
+
+/* input */
+#input-wrap {
+  background: var(--card);
+  border: 1px solid rgba(124,106,247,.3);
+  border-radius: var(--r);
+  padding: 16px;
+  display: none; flex-direction: column; gap: 10px;
+}
+#input-wrap.show { display: flex; }
+.inp-label { font-size: .72rem; font-weight: 800; color: var(--accent); text-transform: uppercase; letter-spacing: .08em; }
+.inp-row { display: flex; gap: 8px; }
+#num-input {
+  flex: 1;
+  background: var(--surface);
+  border: 2px solid rgba(124,106,247,.3);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: 'Onest', sans-serif;
+  font-size: 2rem; font-weight: 900;
+  text-align: center; padding: 10px;
+  outline: none; transition: border .2s;
+  -moz-appearance: textfield;
+}
+#num-input::-webkit-outer-spin-button,
+#num-input::-webkit-inner-spin-button { -webkit-appearance: none; }
+#num-input:focus { border-color: var(--green); }
+.send-btn {
+  background: var(--green); border: none; border-radius: 12px;
+  color: #0b0d14; font-family: 'Nunito',sans-serif;
+  font-weight: 900; font-size: 1.3rem;
+  padding: 0 22px; cursor: pointer;
+  transition: opacity .15s;
+}
+.send-btn:hover { opacity: .85; }
+
+/* ─── Status bar ─── */
+.status {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 16px;
+  display: flex; gap: 16px; flex-wrap: wrap;
+  width: 100%; font-size: .78rem; font-weight: 700;
+}
+.stat { display: flex; align-items: center; gap: 6px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+.dot.ok   { background: var(--green); }
+.dot.warn { background: var(--yellow); }
+.dot.err  { background: var(--red); }
+.stat span { color: var(--muted); }
+.stat strong { color: var(--text); }
+
+/* ─── Instruction cards ─── */
+#cards-section {
+  width: 100%;
+  display: none; flex-direction: column; gap: 14px;
+  animation: fadeUp .35s ease;
+}
+#cards-section.show { display: flex; }
+@keyframes fadeUp { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:none; } }
+
+.cards-heading {
+  font-family: 'Onest', sans-serif;
+  font-size: 1.15rem; font-weight: 900; color: var(--text);
+  border-bottom: 1px solid var(--border); padding-bottom: 10px;
+}
+.cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 14px;
+}
+.instr-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  display: flex; flex-direction: column; gap: 10px;
+  transition: transform .2s, border-color .2s;
+  cursor: default;
+}
+.instr-card:hover { transform: translateY(-3px); border-color: rgba(124,106,247,.4); }
+.instr-card-num {
+  font-size: .68rem; font-weight: 800; color: var(--accent);
+  text-transform: uppercase; letter-spacing: .1em;
+}
+.instr-card-title { font-size: 1rem; font-weight: 900; color: var(--text); }
+.instr-card-img {
+  width: 100%;
+  aspect-ratio: 4/3;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px dashed rgba(255,255,255,.12);
+  display: flex; align-items: center; justify-content: center;
+}
+.instr-card-img img { width: 100%; height: 100%; object-fit: cover; }
+.instr-card-text { font-size: .85rem; color: var(--muted); line-height: 1.55; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<!-- Loading screen -->
+<div id="loading">
+  <div class="spin"></div>
+  <div id="load-title">✋ SignMaker</div>
+  <div id="load-msg">Загружаем MediaPipe…</div>
+</div>
+
+<div class="wrap">
+  <header>
+    <h1>✋ SignMaker MVP</h1>
+    <p>ASL Gesture Recognition · Apron Sewing Guide</p>
+  </header>
+
+  <div class="grid">
+    <!-- Camera -->
+    <div class="cam-wrap">
+      <video id="webcam" autoplay muted playsinline></video>
+      <canvas id="canvas"></canvas>
+
+      <div class="g-bar">
+        <div class="g-emoji" id="g-emoji">❓</div>
+        <div class="g-info">
+          <div class="g-name" id="g-name">Покажи жест…</div>
+          <div class="g-hands" id="g-hands">Рук: 0</div>
+          <div class="conf-row">
+            <div class="conf-bar"><div class="conf-fill" id="conf-fill" style="width:0%"></div></div>
+            <span class="conf-pct" id="conf-pct">0%</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="cam-err">
+        <div style="font-size:3.5rem">📷</div>
+        <div style="font-weight:800;font-size:1.1rem">Нужен доступ к камере</div>
+        <p style="color:var(--muted);font-size:.85rem">Нажми кнопку и разреши использование камеры</p>
+        <button class="err-btn" onclick="startCamera()">Разрешить доступ</button>
+      </div>
+    </div>
+
+    <!-- Dialogue / controls -->
+    <div class="dialog">
+      <div class="stage-bar">
+        <div class="stage-icon" id="stage-icon">🎯</div>
+        <div>
+          <div class="stage-label">Текущий этап</div>
+          <div class="stage-name" id="stage-name">Ожидание жеста…</div>
+        </div>
+      </div>
+
+      <div class="ai-bubble">
+        <div class="bubble-label">📢 Инструкция</div>
+        <div id="ai-text">
+          Подойди к камере и покажи жест <strong>HELP</strong> 👐 обеими руками,<br>
+          чтобы попросить помощь.<br><br>
+          Или сразу покажи жест нужного шага:<br>
+          <strong>MEASURE 📏 · CONNECT 🔗 · CUT ✂️</strong>
+        </div>
+      </div>
+
+      <div id="input-wrap">
+        <div class="inp-label">Введи номер шага (1–8):</div>
+        <div class="inp-row">
+          <input id="num-input" type="number" min="1" max="8" placeholder="1"/>
+          <button class="send-btn" onclick="submitStep()">✓</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status -->
+  <div class="status">
+    <div class="stat"><div class="dot" id="dot-cam"></div><span>Камера:&nbsp;<strong id="stat-cam">запуск…</strong></span></div>
+    <div class="stat"><div class="dot" id="dot-mp"></div><span>MediaPipe:&nbsp;<strong id="stat-mp">загрузка…</strong></span></div>
+    <div class="stat"><div class="dot" id="dot-ws"></div><span>WS:&nbsp;<strong id="stat-ws">соединение…</strong></span></div>
+    <div class="stat"><span>FPS:&nbsp;<strong id="stat-fps">–</strong></span></div>
+    <div class="stat"><span>Руки:&nbsp;<strong id="stat-hands">0</strong></span></div>
+  </div>
+
+  <!-- Instruction cards -->
+  <div id="cards-section">
+    <div class="cards-heading" id="cards-heading">📋 Инструкция</div>
+    <div class="cards-grid" id="cards-grid"></div>
+  </div>
+</div>
+
+<!-- Confetti (success animation) -->
+<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+
+<script type="module">
+import {
+  GestureRecognizer,
+  FilesetResolver,
+  DrawingUtils
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+// ── Constants ──
+const EMOJI = {
+  HELP:"🆘", MEASURE:"📏", CONNECT:"🔗", CUT:"✂️",
+  FOLD:"🔄", IRON:"♨️", SEW:"🪡", CHECK:"✅", DONE:"🏆",
+  Open_Palm:"🖐", Closed_Fist:"✊", Pointing_Up:"☝️",
+  Victory:"✌️", ILoveYou:"🤟", Thumb_Up:"🆘", None:"❓"
+};
+
+// Debounce: only send a gesture to server if held for N ms
+const HOLD_MS    = 900;
+const CONF_THR   = 0.55;
+const HELP_THR   = 0.45;
+const LM_SEND_MS = 120;   // send landmarks to backend ~8 fps (enough for classifier)
+
+// ── DOM refs ──
+const video    = document.getElementById('webcam');
+const canvas   = document.getElementById('canvas');
+const ctx      = canvas.getContext('2d');
+
+const elEmoji  = document.getElementById('g-emoji');
+const elName   = document.getElementById('g-name');
+const elHands  = document.getElementById('g-hands');
+const elFill   = document.getElementById('conf-fill');
+const elPct    = document.getElementById('conf-pct');
+const elAI     = document.getElementById('ai-text');
+const elStageI = document.getElementById('stage-icon');
+const elStageN = document.getElementById('stage-name');
+const elInput  = document.getElementById('input-wrap');
+const elNumIn  = document.getElementById('num-input');
+const elCards  = document.getElementById('cards-section');
+const elGrid   = document.getElementById('cards-grid');
+const elHead   = document.getElementById('cards-heading');
+
+// Status dots
+const dotCam   = document.getElementById('dot-cam');
+const dotMp    = document.getElementById('dot-mp');
+const dotWs    = document.getElementById('dot-ws');
+
+function setStatus(id, dotId, text, state) {
+  document.getElementById(id).textContent = text;
+  const d = document.getElementById(dotId);
+  d.className = 'dot' + (state === 'ok' ? ' ok' : state === 'warn' ? ' warn' : state === 'err' ? ' err' : '');
+}
+
+// ── WebSocket ──
+const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+let ws;
+let wsReady = false;
+
+function connectWS() {
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    wsReady = true;
+    setStatus('stat-ws', 'dot-ws', 'подключён', 'ok');
+    // Debug handshake so backend confirms it receives messages
+    try { ws.send(JSON.stringify({ type: 'hello', ts: Date.now() })); } catch {}
+  };
+  ws.onclose = () => {
+    wsReady = false;
+    setStatus('stat-ws', 'dot-ws', 'отключён', 'err');
+    setTimeout(connectWS, 2000);
+  };
+  ws.onerror = () => {
+    setStatus('stat-ws', 'dot-ws', 'ошибка', 'err');
+  };
+
+  ws.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    if (d.text) {
+      elAI.classList.add('fade');
+      setTimeout(() => { elAI.innerHTML = d.text; elAI.classList.remove('fade'); }, 220);
+    }
+    if (d.stage_icon) elStageI.textContent = d.stage_icon;
+    if (d.stage_name) elStageN.textContent = d.stage_name;
+    if (d.show_input)  elInput.classList.add('show');
+    if (d.show_input === false) elInput.classList.remove('show');
+    if (d.cards) {
+      renderCards(d.cards);
+      // UX: after showing cards, clear and hide input
+      elNumIn.value = '';
+      elInput.classList.remove('show');
+    }
+    if (d.hide_cards)  elCards.classList.remove('show');
+
+    // Success animation (confetti) when stage icon is 🎉
+    if (d.stage_icon === '🎉') {
+      try {
+        if (typeof window.confetti === 'function') {
+          window.confetti({ particleCount: 120, spread: 70, origin: { y: 0.7 } });
+          setTimeout(() => window.confetti({ particleCount: 90, spread: 90, origin: { y: 0.7 } }), 220);
+        } else {
+          document.body.classList.add('flash-success');
+          setTimeout(() => document.body.classList.remove('flash-success'), 450);
+        }
+      } catch {}
+    }
+  };
+}
+connectWS();
+
+function toBackendLandmarks(mpLandmarks) {
+  // mpLandmarks: [hand0[21], hand1[21], ...], each point has {x,y,z}
+  // Backend expects {hand_0:[{x,y,z}...], hand_1:[...]} (up to 2 hands).
+  const out = {};
+  if (!mpLandmarks || !mpLandmarks.length) return out;
+  // stabilize hand ordering: sort by wrist x (left-to-right in image)
+  const hands = mpLandmarks.slice(0, 2).filter(Boolean);
+  hands.sort((a, b) => (a?.[0]?.x ?? 0) - (b?.[0]?.x ?? 0));
+  if (hands[0]) out.hand_0 = hands[0].map(p => ({ x: p.x, y: p.y, z: p.z }));
+  if (hands[1]) out.hand_1 = hands[1].map(p => ({ x: p.x, y: p.y, z: p.z }));
+  return out;
+}
+
+// ── Render instruction cards ──
+function renderCards(cards) {
+  elGrid.innerHTML = '';
+  cards.forEach((card, i) => {
+    const div = document.createElement('div');
+    div.className = 'instr-card';
+    div.innerHTML = `
+      <div class="instr-card-num">Карточка ${i + 1}</div>
+      <div class="instr-card-title">${card.title}</div>
+      <div class="instr-card-img">
+        ${
+          card.image
+            ? `<img src="${card.image}" alt="illustration"/>`
+            : `<div style="color:var(--muted);font-weight:800">no image</div>`
+        }
+      </div>
+      <div class="instr-card-text">${card.text}</div>`;
+    elGrid.appendChild(div);
+  });
+  elCards.classList.add('show');
+  elCards.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ── Step submit ──
+window.submitStep = function () {
+  const val = parseInt(elNumIn.value, 10);
+  if (val >= 1 && val <= 8 && wsReady) {
+    ws.send(JSON.stringify({ type: 'step', step: val }));
+    elNumIn.value = '';
+    elInput.classList.remove('show');
+  }
+};
+
+// Enter key on input
+document.getElementById('num-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') window.submitStep();
+});
+
+// ── MediaPipe Gesture Recognizer ──
+let recognizer = null;
+
+async function initMediaPipe() {
+  document.getElementById('load-msg').textContent = 'Загружаем MediaPipe…';
+  const wasmBase = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+  const modelUrl = "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task";
+
+  for (const delegate of ['GPU', 'CPU']) {
+    try {
+      const vision = await FilesetResolver.forVisionTasks(wasmBase);
+      recognizer = await GestureRecognizer.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: modelUrl, delegate },
+        runningMode: "VIDEO",
+        numHands: 2,
+      });
+      setStatus('stat-mp', 'dot-mp', `готов (${delegate})`, 'ok');
+      return true;
+    } catch (err) {
+      console.warn(`MediaPipe ${delegate} failed:`, err);
+    }
+  }
+  setStatus('stat-mp', 'dot-mp', 'ошибка', 'err');
+  return false;
+}
+
+// ── Camera ──
+window.startCamera = async function () {
+  document.getElementById('cam-err').classList.remove('show');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+    });
+    video.srcObject = stream;
+    await new Promise(res => { video.onloadedmetadata = res; });
+    await video.play();
+    setStatus('stat-cam', 'dot-cam', 'работает', 'ok');
+    return true;
+  } catch (err) {
+    console.warn('Camera error:', err);
+    setStatus('stat-cam', 'dot-cam', 'отказано', 'err');
+    document.getElementById('cam-err').classList.add('show');
+    return false;
+  }
+};
+
+// ── Gesture debounce state ──
+let lastGesture   = 'None';
+let gestureStart  = 0;
+let gestureSent   = false;  // prevent re-sending same gesture
+let lastLmSentAt  = 0;
+
+// ── Render loop ──
+let fps = 0, fpsT = performance.now();
+
+function loop() {
+  requestAnimationFrame(loop);
+
+  if (!recognizer || video.readyState < 2) return;
+
+  if (canvas.width !== video.videoWidth) {
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
+
+  const now = performance.now();
+  let result;
+  try { result = recognizer.recognizeForVideo(video, now); }
+  catch { return; }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const numHands = result.landmarks?.length ?? 0;
+  document.getElementById('stat-hands').textContent = numHands;
+  elHands.textContent = `Рук: ${numHands}`;
+
+  let topGesture = 'None', topConf = 0;
+
+  if (numHands > 0) {
+    const du = new DrawingUtils(ctx);
+    result.landmarks.forEach((lm, i) => {
+      const color = i === 0 ? '#7c6af7' : '#f7c948';
+      du.drawConnectors(lm, GestureRecognizer.HAND_CONNECTIONS, { color, lineWidth: 2 });
+      du.drawLandmarks(lm, { color: '#4ecca3', lineWidth: 1, radius: 3 });
+    });
+
+    (result.gestures ?? []).forEach(g => {
+      if (g[0]?.score > topConf) {
+        topConf    = g[0].score;
+        topGesture = g[0].categoryName;
+      }
+    });
+  }
+
+  // Treat Thumb_Up as HELP (requested)
+  const displayGesture = (topGesture === 'Thumb_Up') ? 'HELP' : topGesture;
+
+  // Update UI
+  elEmoji.textContent = EMOJI[displayGesture] ?? '❓';
+  elName.textContent  = displayGesture === 'None' ? 'Покажи жест…' : displayGesture;
+  elFill.style.width  = Math.round((displayGesture === 'None' ? 0 : topConf) * 100) + '%';
+  elPct.textContent   = Math.round((displayGesture === 'None' ? 0 : topConf) * 100) + '%';
+
+  // Debounce logic: hold gesture for HOLD_MS before sending
+  if (displayGesture !== 'None' && displayGesture === lastGesture) {
+    if (!gestureSent && (now - gestureStart) >= HOLD_MS) {
+      const isHelp = (displayGesture === 'Open_Palm' && numHands >= 2) || displayGesture === 'HELP';
+      const conf   = topConf;
+      const threshold = isHelp ? HELP_THR : CONF_THR;
+
+      if (conf >= threshold && wsReady) {
+        ws.send(JSON.stringify({
+          type:       'gesture',
+          gesture:    displayGesture,
+          confidence: +conf.toFixed(3),
+          hands:      numHands,
+        }));
+        gestureSent = true;
+      }
+    }
+  } else {
+    lastGesture  = displayGesture;
+    gestureStart = now;
+    gestureSent  = false;
+  }
+
+  // Stream landmarks (throttled) so backend can run YOUR custom classifier (HELP/MEASURE/CONNECT)
+  // Send when at least 1 hand is visible (backend zero-pads missing hand).
+  if (wsReady && numHands > 0 && (now - lastLmSentAt) >= LM_SEND_MS) {
+    lastLmSentAt = now;
+    ws.send(JSON.stringify({
+      type: "landmarks",
+      landmarks: toBackendLandmarks(result.landmarks),
+      mp_gesture: displayGesture,
+      mp_confidence: +topConf.toFixed(3),
+      hands: numHands,
+    }));
+  }
+
+  // FPS counter
+  fps++;
+  if (now - fpsT >= 1000) {
+    document.getElementById('stat-fps').textContent = fps;
+    fps = 0; fpsT = now;
+  }
+}
+
+// ── Boot ──
+async function boot() {
+  const mpOk  = await initMediaPipe();
+  const camOk = await startCamera();
+
+  const loading = document.getElementById('loading');
+  if (!mpOk || !camOk) {
+    document.getElementById('load-msg').textContent = mpOk
+      ? 'Ошибка камеры ↑'
+      : 'Ошибка MediaPipe';
+    return;
+  }
+  loading.classList.add('hidden');
+  setTimeout(() => loading.style.display = 'none', 450);
+  loop();
+}
+
+boot();
+</script>
+</body>
+</html>
