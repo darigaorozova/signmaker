@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import uvicorn
+import httpx  # для вызова Gemma 4 API
 
 # ── Gemma 4 setup (по ТЗ) ──────────────────────────────────────────────────
 GEMMA_MODEL = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
@@ -30,6 +31,34 @@ if MODEL_PATH.exists():
     with open(MODEL_PATH, "rb") as f:
         raw = pickle.load(f)
     clf = raw["model"] if isinstance(raw, dict) and "model" in raw else raw
+
+
+# ── Gemma 4 generation ────────────────────────────────────────────────────
+async def generate_step_cards_with_gemma(step_num: int, step_title: str) -> str | None:
+    """Ask Gemma 4 to generate or enrich the step instructions for the child."""
+    if not (GEMMA_API_KEY or "").strip():
+        return None  # fallback на статический контент
+
+    prompt = (
+        f"Ты — учитель технологии для слабослышащих детей 13–15 лет. "
+        f"Объясни шаг изготовления фартука №{step_num} «{step_title}» "
+        f"в 4 коротких пунктах простым русским языком. "
+        f"Каждый пункт максимум 12 слов. Без вступления, только пункты."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{GEMMA_MODEL}:generateContent?key={GEMMA_API_KEY}",
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        logger.warning(f"Gemma call failed: {e}")
+        return None
+
 
 def _extract_hands(lm_data):
     """
@@ -239,13 +268,20 @@ APRON_STEPS = {
     }
 }
 
+# Создаём static/images заранее, чтобы StaticFiles не упал при старте
+Path("static/images").mkdir(parents=True, exist_ok=True)
+
 app = FastAPI()
+# NOTE: open CORS — OK для хакатона/демо, ужесточить при выходе в продакшн
 app.add_middleware(CORSMiddleware, allow_origins=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
 async def root():
-    return HTMLResponse(Path("index.html").read_text(encoding="utf-8"))
+    try:
+        return HTMLResponse(Path("index.html").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return HTMLResponse("<h1>index.html not found</h1>", status_code=500)
 
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
@@ -275,21 +311,25 @@ async def ws_handler(ws: WebSocket):
                     keys = ",".join(sorted([str(k) for k in data.keys()]))
                 except Exception:
                     keys = "?"
-                print(f"DEBUG: rx type={msg_type} keys={keys}", flush=True)
+                logger.debug(f"rx type={msg_type} keys={keys}")
                 last_rx_log_at = now_ts
 
             # 1) ОСНОВНОЙ ПУТЬ: landmarks -> твоя обученная модель (HELP/MEASURE/CONNECT)
             if msg_type == "landmarks":
                 if clf is None:
+                    await ws.send_json({
+                        "text": "⚠️ Модель жестов не загружена. Обратитесь к учителю.",
+                        "stage_name": "Ошибка",
+                        "stage_icon": "⚠️",
+                    })
                     continue
 
                 feat = landmarks_to_features(data.get("landmarks")).reshape(1, -1)
                 gesture, conf = _safe_predict(clf, feat)
 
                 # Debug: видим, что реально предсказывает модель в рантайме
-                print(
-                    f"DEBUG: gesture={gesture} conf={conf:.2f} active={ai_active} hands={data.get('hands')}",
-                    flush=True,
+                logger.debug(
+                    f"gesture={gesture} conf={conf:.2f} active={ai_active} hands={data.get('hands')}"
                 )
 
                 # Полностью игнорируем любые THUMB* (убираем ложные срабатывания)
@@ -322,7 +362,7 @@ async def ws_handler(ws: WebSocket):
                     continue
 
                 # VICTORY: stage completion / positive reinforcement
-                if stable_gesture in ("VICTORY", "Victory") :
+                if stable_gesture == "VICTORY":
                     await ws.send_json({
                         "text": "🌟 <b>Блестящая работа!</b> Ты настоящий мастер. Теперь мы готовы двигаться дальше!",
                         "stage_name": "Успех!",
@@ -391,8 +431,7 @@ async def ws_handler(ws: WebSocket):
                 if g == "Victory":
                     g = "VICTORY"
                 # Можно вывести на экран, что сервер получил, чтобы дебажить протокол
-                # (логи в терминале)
-                print(f"DEBUG: mp_gesture={g} conf={data.get('confidence')} hands={data.get('hands')}", flush=True)
+                logger.debug(f"mp_gesture={g} conf={data.get('confidence')} hands={data.get('hands')}")
 
                 # VICTORY via frontend gesture event
                 if g == "VICTORY":
@@ -419,6 +458,28 @@ async def ws_handler(ws: WebSocket):
                     })
                     continue
 
+                # MEASURE через резервный путь (если кастомная модель недоступна)
+                if g == "MEASURE" and ai_active:
+                    pending_step_prompt = 1
+                    await ws.send_json({
+                        "show_input": True,
+                        "text": "📏 <b>Хочешь узнать, как делать замеры?</b> Нажми «1» на клавиатуре для подтверждения.",
+                        "stage_name": "Уточнение",
+                        "stage_icon": "❓",
+                    })
+                    continue
+
+                # CONNECT через резервный путь
+                if g == "CONNECT" and ai_active:
+                    pending_step_prompt = 6
+                    await ws.send_json({
+                        "show_input": True,
+                        "text": "🔗 <b>Переходим к сборке фартука?</b> Введи «6» на клавиатуре, чтобы открыть инструкции.",
+                        "stage_name": "Уточнение",
+                        "stage_icon": "❓",
+                    })
+                    continue
+
             elif msg_type == "hello":
                 # lightweight debug reply so you can see backend is receiving messages
                 await ws.send_json({
@@ -431,24 +492,55 @@ async def ws_handler(ws: WebSocket):
             elif msg_type == "step":
                 try:
                     step_num = int(data.get("step", 0))
+
+                    # Валидация: жест ожидает конкретное число
+                    if pending_step_prompt and step_num != pending_step_prompt:
+                        await ws.send_json({
+                            "text": f"⚠️ Пожалуйста, введи <b>{pending_step_prompt}</b> для подтверждения.",
+                            "stage_name": "Попробуй ещё раз",
+                            "stage_icon": "❓",
+                        })
+                        continue
+
                     if step_num in APRON_STEPS:
                         step_data = APRON_STEPS[step_num]
-                        cards = []
-                        for c in step_data["cards"]:
-                            cards.append({
+                        cards = [
+                            {
                                 "title": c["title"],
                                 "text": c["text"],
                                 "image": c.get("image"),
-                            })
+                            }
+                            for c in step_data["cards"]
+                        ]
+
+                        # Обогащение от Gemma 4 (если ключ задан)
+                        ai_text = await generate_step_cards_with_gemma(
+                            step_num, step_data["title"]
+                        )
+
                         await ws.send_json({
-                            "text": f"✅ <b>Загрузка карточек для Шага {step_num}...</b>",
+                            "text": f"✅ <b>Шаг {step_num} — {step_data['title']}</b>",
+                            "ai_explanation": ai_text,  # фронт сам решает, что делать с None
                             "stage_name": step_data["title"],
                             "stage_icon": step_data["icon"],
                             "cards": cards,
                             "show_input": False,
                         })
-                except:
-                    pass
+                        # после успешного открытия шага сбрасываем ожидание
+                        pending_step_prompt = None
+                    else:
+                        await ws.send_json({
+                            "text": "⚠️ Такого шага пока нет. Доступно: 1 (Замеры) или 6 (Сборка).",
+                            "stage_name": "Ошибка",
+                            "stage_icon": "❓",
+                        })
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Step parse error: {e}")
+                    await ws.send_json({
+                        "text": "⚠️ Введи число — 1 или 6.",
+                        "stage_name": "Ошибка",
+                        "stage_icon": "❓",
+                    })
 
     except WebSocketDisconnect:
         pass
